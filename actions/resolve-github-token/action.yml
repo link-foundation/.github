@@ -1,0 +1,61 @@
+name: Resolve GitHub token
+description: Resolve optional App, AUTOMATION_TOKEN, and default credentials for every repository workload.
+inputs:
+  app-id:
+    description: AUTOMATION_APP_ID repository or organization variable.
+    required: false
+  app-private-key:
+    description: AUTOMATION_APP_PRIVATE_KEY secret.
+    required: false
+  token:
+    description: Optional AUTOMATION_TOKEN secret shared by all workloads.
+    required: false
+  default-token:
+    description: Repository GITHUB_TOKEN fallback.
+    required: false
+    default: ${{ github.token }}
+  owner:
+    description: Target installation and repository creation owner.
+    required: false
+    default: ${{ github.repository_owner }}
+  repositories:
+    description: Optional comma or newline separated App repository scope; empty uses the owner's installation.
+    required: false
+outputs:
+  token:
+    description: Selected credential, masked in logs.
+    value: ${{ steps.resolve.outputs.token }}
+  layer:
+    description: app, token, or default.
+    value: ${{ steps.resolve.outputs.layer }}
+  triggers-workflows:
+    description: Whether ordinary credential-triggered events start workflows without approval.
+    value: ${{ steps.resolve.outputs.triggers-workflows }}
+  can-create-repositories:
+    description: Whether repository creation permission is confirmed in the target owner.
+    value: ${{ steps.resolve.outputs.can-create-repositories }}
+runs:
+  using: composite
+  steps:
+    - name: Mint installation credential when configured
+      id: app
+      if: inputs.app-id != '' && inputs.app-private-key != ''
+      continue-on-error: true
+      uses: actions/create-github-app-token@v3
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.app-private-key }}
+        owner: ${{ inputs.owner }}
+        repositories: ${{ inputs.repositories }}
+    - name: Resolve and report credential layer
+      id: resolve
+      shell: bash
+      env:
+        APP_ID: ${{ inputs.app-id }}
+        APP_PRIVATE_KEY: ${{ inputs.app-private-key }}
+        APP_TOKEN: ${{ steps.app.outputs.token }}
+        INPUT_TOKEN: ${{ inputs.token }}
+        DEFAULT_TOKEN: ${{ inputs.default-token }}
+        TARGET_OWNER: ${{ inputs.owner }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: python3 "$ACTION_PATH/main.py"
