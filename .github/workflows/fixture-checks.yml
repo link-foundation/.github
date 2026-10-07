@@ -1,0 +1,26 @@
+name: Fixture checks
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Dispatch contract.
+        required: true
+        type: choice
+        default: checks
+        options: [checks]
+permissions:
+  contents: read
+jobs:
+  fixture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Confirm checks-only execution
+        env:
+          EVENT: ${{ github.event_name }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ]; then test "$MODE" = checks; fi
+          echo 'Fixture checks passed.'

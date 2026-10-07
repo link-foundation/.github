@@ -1,0 +1,566 @@
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -11,18 +11,25 @@
+   # must go through this workflow (release.yml)
+   workflow_dispatch:
+     inputs:
++      mode:
++        description: Checks only, or explicitly enable release and automation jobs.
++        type: choice
++        default: checks
++        options: [checks, release]
+       release_mode:
+         description: 'Manual release mode'
+         required: true
+         type: choice
+-        default: 'instant'
++        default: checks
+         options:
++          - checks
+           - instant
+           - changeset-pr
+       bump_type:
+         description: 'Manual release type'
+         required: true
+         type: choice
++        default: patch
+         options:
+           - patch
+           - minor
+@@ -68,6 +75,14 @@
+       docs-changed: ${{ steps.changes.outputs.docs-changed }}
+       any-code-changed: ${{ steps.changes.outputs.any-code-changed }}
+     steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       - uses: actions/checkout@v6
+         with:
+           fetch-depth: 0
+@@ -79,7 +94,7 @@
+           GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+           GITHUB_BEFORE_SHA: ${{ github.event.before }}
+           GITHUB_AFTER_SHA: ${{ github.event.after }}
+-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GITHUB_TOKEN: ${{ steps.gh.outputs.token }}
+           GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
+         run: node scripts/detect-code-changes.mjs
+ 
+@@ -96,8 +111,9 @@
+       group: check-${{ github.workflow }}-${{ github.ref }}-test-compilation
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [detect-changes]
+-    if: |
+-      needs.detect-changes.outputs.js-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (needs.detect-changes.outputs.js-changed == 'true'))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -116,9 +132,10 @@
+       group: check-${{ github.workflow }}-${{ github.ref }}-check-file-line-limits
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [detect-changes]
+-    if: |
+-      needs.detect-changes.outputs.docs-changed == 'true' ||
+-      needs.detect-changes.outputs.any-code-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (needs.detect-changes.outputs.docs-changed == 'true' || needs.detect-changes.outputs.any-code-changed ==
++      'true'))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -128,7 +145,7 @@
+       - name: Simulate fresh merge with base branch (PR only)
+         if: github.event_name == 'pull_request'
+         env:
+-          BASE_REF: ${{ github.base_ref }}
++          BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+         run: bash scripts/simulate-fresh-merge.sh
+ 
+       # Enforces the 1500-line limit on JavaScript (.js/.mjs/.cjs) and
+@@ -147,7 +164,9 @@
+     concurrency:
+       group: check-${{ github.workflow }}-${{ github.ref }}-version-check
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+-    if: github.event_name == 'pull_request'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (github.event_name == 'pull_request'))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -156,10 +175,10 @@
+ 
+       - name: Check for version changes in package.json
+         env:
+-          GITHUB_HEAD_REF: ${{ github.head_ref }}
+-          GITHUB_BASE_REF: ${{ github.base_ref }}
++          GITHUB_HEAD_REF: ${{ github.head_ref || github.ref_name }}
++          GITHUB_BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+           GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+-          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
++          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+           RELEASE_PR_ACTOR: ${{ vars.RELEASE_PR_ACTOR }}
+         run: node scripts/check-version.mjs
+ 
+@@ -174,7 +193,9 @@
+       group: check-${{ github.workflow }}-${{ github.ref }}-changeset-check
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [detect-changes]
+-    if: github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -192,10 +213,10 @@
+       - name: Check for changesets
+         env:
+           # Pass PR context to the validation script
+-          GITHUB_BASE_REF: ${{ github.base_ref }}
++          GITHUB_BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+           GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+-          GITHUB_HEAD_REF: ${{ github.head_ref }}
+-          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
++          GITHUB_HEAD_REF: ${{ github.head_ref || github.ref_name }}
++          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+           RELEASE_PR_ACTOR: ${{ vars.RELEASE_PR_ACTOR }}
+         run: |
+           # Run changeset validation script
+@@ -218,13 +239,10 @@
+       group: check-${{ github.workflow }}-${{ github.ref }}-lint
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [detect-changes]
+-    if: |
+-      !cancelled() &&
+-      (
+-        github.event_name == 'workflow_dispatch' ||
+-        needs.detect-changes.outputs.docs-changed == 'true' ||
+-        needs.detect-changes.outputs.any-code-changed == 'true'
+-      )
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && ( github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.docs-changed == 'true' ||
++      needs.detect-changes.outputs.any-code-changed == 'true' )))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -235,7 +253,7 @@
+       - name: Simulate fresh merge with base branch (PR only)
+         if: github.event_name == 'pull_request'
+         env:
+-          BASE_REF: ${{ github.base_ref }}
++          BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+         run: bash scripts/simulate-fresh-merge.sh
+ 
+       - name: Setup Node.js
+@@ -287,19 +305,14 @@
+     # Run for relevant code/package/workflow changes, or for an instant manual
+     # release. Skipped fast checks count as non-failures only after one of
+     # those positive gates passes.
+-    if: |
+-      !cancelled() &&
+-      (
+-        needs.detect-changes.outputs.any-code-changed == 'true' ||
+-        (
+-          github.event_name == 'workflow_dispatch' &&
+-          github.event.inputs.release_mode == 'instant'
+-        )
+-      ) &&
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && ( needs.detect-changes.outputs.any-code-changed == 'true' || ( github.event_name ==
++      'workflow_dispatch' && github.event.inputs.release_mode == 'instant' ) ) &&
+       (needs.changeset-check.result == 'success' || needs.changeset-check.result == 'skipped') &&
+       (needs.test-compilation.result == 'success' || needs.test-compilation.result == 'skipped') &&
+       (needs.lint.result == 'success' || needs.lint.result == 'skipped') &&
+-      (needs.check-file-line-limits.result == 'success' || needs.check-file-line-limits.result == 'skipped')
++      (needs.check-file-line-limits.result == 'success' || needs.check-file-line-limits.result == 'skipped')))
+     strategy:
+       fail-fast: false
+       matrix:
+@@ -315,7 +328,7 @@
+       - name: Simulate fresh merge with base branch (PR only)
+         if: github.event_name == 'pull_request'
+         env:
+-          BASE_REF: ${{ github.base_ref }}
++          BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+         shell: bash
+         run: bash scripts/simulate-fresh-merge.sh
+ 
+@@ -380,7 +393,9 @@
+       group: check-${{ github.workflow }}-${{ github.ref }}-docker-build
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [detect-changes]
+-    if: github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'))
+     permissions:
+       contents: read
+     env:
+@@ -432,8 +447,9 @@
+       group: check-${{ github.workflow }}-${{ github.ref }}-validate-docs
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [detect-changes]
+-    if: |
+-      needs.detect-changes.outputs.docs-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (needs.detect-changes.outputs.docs-changed == 'true'))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -483,7 +499,7 @@
+             ${{
+               (
+                 (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+-                (github.event_name == 'workflow_dispatch' && github.event.inputs.release_mode == 'instant')
++                ((github.event_name == 'workflow_dispatch' && inputs.mode == 'release') && github.event.inputs.release_mode == 'instant')
+               ) && 'release' || 'report'
+             }}
+           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+@@ -515,15 +531,12 @@
+       cancel-in-progress: false
+     # Use !cancelled() instead of always() so cancellation propagates correctly (hive-mind issue #1278)
+     # This is needed because lint/test jobs have a transitive dependency on changeset-check
+-    if: |
+-      !cancelled() &&
+-      github.ref == 'refs/heads/main' &&
+-      github.event_name == 'push' &&
+-      needs.release-preflight.result == 'success' &&
+-      needs.lint.result == 'success' &&
+-      needs.test.result == 'success' &&
+-      !contains(needs.*.result, 'failure') &&
+-      !contains(needs.*.result, 'cancelled')
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (!cancelled() && github.ref == 'refs/heads/main' &&
++      github.event_name == 'push' && needs.release-preflight.result == 'success' && needs.lint.result ==
++      'success' && needs.test.result == 'success' && !contains(needs.*.result, 'failure') &&
++      !contains(needs.*.result, 'cancelled'))
+     runs-on: ubuntu-24.04
+     # Permissions required for npm OIDC trusted publishing
+     permissions:
+@@ -535,6 +548,14 @@
+       published: ${{ steps.publish.outputs.published }}
+       published_version: ${{ steps.publish.outputs.published_version }}
+     steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       # One of two checkouts in this workflow that keep credentials in
+       # .git/config: scripts/version-and-commit.mjs runs
+       # `git push origin main` to publish the version bump, which needs the
+@@ -576,7 +597,7 @@
+         id: check_release
+         env:
+           HAS_CHANGESETS: ${{ steps.check_changesets.outputs.has_changesets }}
+-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GITHUB_TOKEN: ${{ steps.gh.outputs.token }}
+         run: node scripts/check-release-needed.mjs
+ 
+       - name: Merge multiple changesets
+@@ -591,8 +612,8 @@
+         env:
+           # Prefer the dedicated actor when configured. Otherwise the built-in
+           # token attests a metadata-only version commit after parent validation.
+-          RELEASE_PR_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
+-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          RELEASE_PR_TOKEN: ${{ steps.gh.outputs.token }}
++          GITHUB_TOKEN: ${{ steps.gh.outputs.token }}
+           RELEASE_METADATA_PATHS: ${{ vars.RELEASE_METADATA_PATHS }}
+         run: node scripts/version-and-commit.mjs --mode changeset
+ 
+@@ -624,7 +645,7 @@
+       - name: Create GitHub Release
+         if: steps.publish.outputs.published == 'true'
+         env:
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_TOKEN: ${{ steps.gh.outputs.token }}
+           PACKAGE_VERSION: ${{ steps.publish.outputs.published_version }}
+           REPOSITORY: ${{ github.repository }}
+         run: node scripts/create-github-release.mjs --release-version "$PACKAGE_VERSION" --repository "$REPOSITORY"
+@@ -632,7 +653,7 @@
+       - name: Format GitHub release notes
+         if: steps.publish.outputs.published == 'true'
+         env:
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_TOKEN: ${{ steps.gh.outputs.token }}
+           PACKAGE_VERSION: ${{ steps.publish.outputs.published_version }}
+           REPOSITORY: ${{ github.repository }}
+           COMMIT_SHA: ${{ github.sha }}
+@@ -657,15 +678,12 @@
+         validate-docs,
+         release-preflight,
+       ]
+-    if: |
+-      !cancelled() &&
+-      github.event_name == 'workflow_dispatch' &&
+-      github.event.inputs.release_mode == 'instant' &&
+-      needs.release-preflight.result == 'success' &&
+-      needs.lint.result == 'success' &&
+-      needs.test.result == 'success' &&
+-      !contains(needs.*.result, 'failure') &&
+-      !contains(needs.*.result, 'cancelled')
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (!cancelled() && github.event_name ==
++      'workflow_dispatch' && github.event.inputs.release_mode == 'instant' && needs.release-preflight.result
++      == 'success' && needs.lint.result == 'success' && needs.test.result == 'success' &&
++      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled'))
+     runs-on: ubuntu-24.04
+     # Same publish envelope as the automated release path.
+     timeout-minutes: 50
+@@ -682,6 +700,14 @@
+       published: ${{ steps.publish.outputs.published }}
+       published_version: ${{ steps.publish.outputs.published_version }}
+     steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       # The second checkout in this workflow that keeps credentials in
+       # .git/config: scripts/version-and-commit.mjs pushes the version
+       # commit to main, which needs the token wired into the remote.
+@@ -713,8 +739,8 @@
+           BUMP_TYPE: ${{ github.event.inputs.bump_type }}
+           RELEASE_DESCRIPTION: ${{ github.event.inputs.description }}
+           # See the release job above (issues #143, #192, and #196).
+-          RELEASE_PR_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
+-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          RELEASE_PR_TOKEN: ${{ steps.gh.outputs.token }}
++          GITHUB_TOKEN: ${{ steps.gh.outputs.token }}
+           RELEASE_METADATA_PATHS: ${{ vars.RELEASE_METADATA_PATHS }}
+         run: node scripts/version-and-commit.mjs --mode instant --bump-type "$BUMP_TYPE" --description "$RELEASE_DESCRIPTION"
+ 
+@@ -737,7 +763,7 @@
+       - name: Create GitHub Release
+         if: steps.publish.outputs.published == 'true'
+         env:
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_TOKEN: ${{ steps.gh.outputs.token }}
+           PACKAGE_VERSION: ${{ steps.publish.outputs.published_version }}
+           REPOSITORY: ${{ github.repository }}
+         run: node scripts/create-github-release.mjs --release-version "$PACKAGE_VERSION" --repository "$REPOSITORY"
+@@ -745,7 +771,7 @@
+       - name: Format GitHub release notes
+         if: steps.publish.outputs.published == 'true'
+         env:
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_TOKEN: ${{ steps.gh.outputs.token }}
+           PACKAGE_VERSION: ${{ steps.publish.outputs.published_version }}
+           REPOSITORY: ${{ github.repository }}
+           COMMIT_SHA: ${{ github.sha }}
+@@ -761,13 +787,11 @@
+     concurrency:
+       group: main-writer-${{ github.repository }}-main
+       cancel-in-progress: false
+-    if: |
+-      !cancelled() &&
+-      needs.release-preflight.result == 'success' &&
+-      (
+-        (needs.release.result == 'success' && needs.release.outputs.published == 'true') ||
+-        (needs.instant-release.result == 'success' && needs.instant-release.outputs.published == 'true')
+-      )
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (!cancelled() && needs.release-preflight.result ==
++      'success' && ( (needs.release.result == 'success' && needs.release.outputs.published == 'true') ||
++      (needs.instant-release.result == 'success' && needs.instant-release.outputs.published == 'true') ))
+     runs-on: ubuntu-24.04
+     permissions:
+       contents: read
+@@ -810,7 +834,10 @@
+   docker-publish-build:
+     name: Build Docker Image (${{ matrix.platform }})
+     needs: [docker-publish-config]
+-    if: needs.docker-publish-config.outputs.enabled == 'true'
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (needs.docker-publish-config.outputs.enabled ==
++      'true')
+     timeout-minutes: 30
+     strategy:
+       fail-fast: false
+@@ -861,7 +888,9 @@
+   docker-publish:
+     name: Optional Docker Hub Publish
+     needs: [docker-publish-config, docker-publish-build]
+-    if: needs.docker-publish-build.result == 'success'
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (needs.docker-publish-build.result == 'success')
+     timeout-minutes: 30
+     concurrency:
+       group: main-writer-${{ github.repository }}-main
+@@ -933,11 +962,11 @@
+     name: Create Changeset PR
+     # PR creation does not publish, but it must still pass the fast lint gate.
+     needs: [lint]
+-    if: |
+-      !cancelled() &&
+-      github.event_name == 'workflow_dispatch' &&
+-      github.event.inputs.release_mode == 'changeset-pr' &&
+-      needs.lint.result == 'success'
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (!cancelled() && github.event_name ==
++      'workflow_dispatch' && github.event.inputs.release_mode == 'changeset-pr' && needs.lint.result ==
++      'success')
+     runs-on: ubuntu-24.04
+     # PR creation only: install, create a changeset, format, and open a PR.
+     timeout-minutes: 10
+@@ -945,23 +974,24 @@
+       group: main-writer-${{ github.repository }}-main
+       cancel-in-progress: false
+     permissions:
+-      contents: read
+-    steps:
++      actions: write
++      pull-requests: write
++      contents: write
++    steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       # peter-evans/create-pull-request receives the dedicated token directly;
+       # dependency installation does not need a credential in .git/config.
+       - uses: actions/checkout@v6
+         with:
+           persist-credentials: false
+           fetch-depth: 0
+-
+-      - name: Require release pull-request token
+-        env:
+-          RELEASE_PR_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
+-        run: |
+-          if [[ -z "$RELEASE_PR_TOKEN" ]]; then
+-            echo "::error::RELEASE_PR_TOKEN is required to create a changeset pull request."
+-            exit 1
+-          fi
+ 
+       - name: Setup Node.js
+         uses: actions/setup-node@v6
+@@ -985,11 +1015,12 @@
+           echo "Formatted changeset files"
+ 
+       - name: Create Pull Request
++        id: automation-pr
+         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+         with:
+           # The built-in token suppresses pull_request workflows; use the same
+           # dedicated automation actor as the release fallback (issue #192).
+-          token: ${{ secrets.RELEASE_PR_TOKEN }}
++          token: ${{ steps.gh.outputs.token }}
+           commit-message: 'chore: add changeset for manual ${{ github.event.inputs.bump_type }} release'
+           branch: changeset-manual-release-${{ github.run_id }}
+           delete-branch: true
+@@ -1009,6 +1040,15 @@
+             2. Merge this PR to main
+             3. The automated release workflow will create a version PR
+             4. Merge the version PR to publish to npm and create a GitHub release
++
++      - name: Dispatch checks for automation pull request
++        if: steps.automation-pr.outputs.pull-request-number != ''
++        uses: link-foundation/.github/actions/dispatch-checks@main
++        with:
++          ref: ${{ steps.automation-pr.outputs.pull-request-branch }}
++          workflows: release.yml
++          token: ${{ steps.gh.outputs.token }}
++          triggers-workflows: ${{ steps.gh.outputs.triggers-workflows }}
+ 
+   # GitHub reports jobs killed by timeout-minutes as cancelled rather than
+   # failed. Observe every job and excuse only cancellations that the tested
+--- /dev/null
++++ b/.github/workflows/automation-pr.yml
+@@ -0,0 +1,66 @@
++name: Automation documentation pull request
++on:
++  workflow_dispatch:
++    inputs:
++      mode:
++        description: Choose create-pr to request a documentation update.
++        type: choice
++        default: checks
++        options: [checks, create-pr]
++      description:
++        description: Documentation text to append to docs/automation.md.
++        type: string
++        default: Automated documentation update.
++permissions:
++  contents: read
++concurrency:
++  group: automation-documentation-pr
++  cancel-in-progress: false
++jobs:
++  update:
++    if: >-
++      inputs.mode == 'create-pr' &&
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
++    runs-on: ubuntu-24.04
++    timeout-minutes: 10
++    permissions:
++      contents: write
++      pull-requests: write
++      actions: write
++    steps:
++      - uses: actions/checkout@v6
++        with:
++          persist-credentials: false
++      - uses: link-foundation/.github/actions/resolve-github-token@main
++        id: gh
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
++      - name: Prepare documentation update
++        env:
++          DESCRIPTION: ${{ inputs.description }}
++        run: |
++          python3 - <<'PY'
++          import os
++          from pathlib import Path
++          path = Path('docs/automation.md')
++          path.parent.mkdir(parents=True, exist_ok=True)
++          with path.open('a') as stream:
++              stream.write(os.environ['DESCRIPTION'] + '\n')
++          PY
++      - uses: peter-evans/create-pull-request@v8
++        id: pr
++        with:
++          token: ${{ steps.gh.outputs.token }}
++          branch: automation/documentation
++          title: 'docs: automation update'
++          commit-message: 'docs: automation update'
++      - uses: link-foundation/.github/actions/dispatch-checks@main
++        if: steps.pr.outputs.pull-request-number != ''
++        with:
++          ref: ${{ steps.pr.outputs.pull-request-branch }}
++          workflows: release.yml
++          token: ${{ steps.gh.outputs.token }}
++          triggers-workflows: ${{ steps.gh.outputs.triggers-workflows }}

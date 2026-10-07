@@ -1,0 +1,2 @@
+# Unified diffs intentionally contain a space for unchanged empty lines.
+templates/patches/*.patch -whitespace

@@ -1,0 +1,530 @@
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -8,18 +8,25 @@
+     types: [opened, synchronize, reopened]
+   workflow_dispatch:
+     inputs:
++      mode:
++        description: Checks only, or explicitly enable release and automation jobs.
++        type: choice
++        default: checks
++        options: [checks, release]
+       release_mode:
+         description: 'Manual release mode'
+         required: true
+         type: choice
+-        default: 'instant'
++        default: checks
+         options:
++          - checks
+           - instant
+           - changelog-pr
+       bump_type:
+         description: 'Version bump type'
+         required: true
+         type: choice
++        default: patch
+         options:
+           - patch
+           - minor
+@@ -113,7 +120,9 @@
+       group: ${{ github.workflow }}-${{ github.ref }}-validate-docs
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [detect-changes]
+-    if: needs.detect-changes.outputs.docs-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (needs.detect-changes.outputs.docs-changed == 'true'))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -148,7 +157,7 @@
+             ${{
+               (
+                 (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+-                (github.event_name == 'workflow_dispatch' && github.event.inputs.release_mode == 'instant')
++                ((github.event_name == 'workflow_dispatch' && inputs.mode == 'release') && github.event.inputs.release_mode == 'instant')
+               ) && 'release' || 'report'
+             }}
+           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+@@ -168,7 +177,9 @@
+       group: ${{ github.workflow }}-${{ github.ref }}-changelog
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [detect-changes]
+-    if: github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -187,7 +198,7 @@
+ 
+       - name: Check for changelog fragments
+         env:
+-          GITHUB_BASE_REF: ${{ github.base_ref }}
++          GITHUB_BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+         run: rust-script scripts/check-changelog-fragment.rs
+ 
+   # === VERSION CHECK - prevents manual version modification in PRs ===
+@@ -199,7 +210,9 @@
+     concurrency:
+       group: ${{ github.workflow }}-${{ github.ref }}-version-check
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+-    if: github.event_name == 'pull_request'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (github.event_name == 'pull_request'))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -218,9 +231,9 @@
+ 
+       - name: Check for manual version changes
+         env:
+-          GITHUB_EVENT_NAME: ${{ github.event_name }}
+-          GITHUB_HEAD_REF: ${{ github.head_ref }}
+-          GITHUB_BASE_REF: ${{ github.base_ref }}
++          GITHUB_EVENT_NAME: ${{ github.event_name == 'workflow_dispatch' && 'pull_request' || github.event_name }}
++          GITHUB_HEAD_REF: ${{ github.head_ref || github.ref_name }}
++          GITHUB_BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+         run: rust-script scripts/check-version-modification.rs
+ 
+   # === SECRETS SCAN ===
+@@ -251,7 +264,9 @@
+       group: ${{ github.workflow }}-${{ github.ref }}-fresh-merge
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [detect-changes]
+-    if: github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -279,7 +294,7 @@
+ 
+       - name: Simulate fresh merge with base branch
+         env:
+-          GITHUB_BASE_REF: ${{ github.base_ref }}
++          GITHUB_BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+           FRESH_MERGE_BUDGET_SECONDS: 1200
+         run: >-
+           bash scripts/run-with-budget-warning.sh "$FRESH_MERGE_BUDGET_SECONDS" "Fresh merge simulation"
+@@ -303,7 +318,9 @@
+       group: ${{ github.workflow }}-${{ github.ref }}-docker-build
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [detect-changes]
+-    if: github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -349,14 +366,11 @@
+       group: ${{ github.workflow }}-${{ github.ref }}-cargo-lock
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [detect-changes]
+-    if: |
+-      !cancelled() && (
+-        github.event_name == 'workflow_dispatch' ||
+-        needs.detect-changes.outputs.rs-changed == 'true' ||
+-        needs.detect-changes.outputs.toml-changed == 'true' ||
+-        needs.detect-changes.outputs.workflow-changed == 'true' ||
+-        needs.detect-changes.outputs.any-code-changed == 'true'
+-      )
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && ( github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.rs-changed == 'true' ||
++      needs.detect-changes.outputs.toml-changed == 'true' || needs.detect-changes.outputs.workflow-changed ==
++      'true' || needs.detect-changes.outputs.any-code-changed == 'true' )))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -389,16 +403,12 @@
+     # Note: !cancelled() is required because detect-changes is skipped on workflow_dispatch,
+     # and without it, this job would also be skipped even though its condition includes workflow_dispatch.
+     # See: https://github.com/actions/runner/issues/491
+-    if: |
+-      !cancelled() && (
+-        needs.cargo-lock.result == 'success' && (
+-          github.event_name == 'workflow_dispatch' ||
+-          needs.detect-changes.outputs.rs-changed == 'true' ||
+-          needs.detect-changes.outputs.toml-changed == 'true' ||
+-          needs.detect-changes.outputs.workflow-changed == 'true' ||
+-          needs.detect-changes.outputs.any-code-changed == 'true'
+-        )
+-      )
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && ( needs.cargo-lock.result == 'success' && ( github.event_name == 'workflow_dispatch' ||
++      needs.detect-changes.outputs.rs-changed == 'true' || needs.detect-changes.outputs.toml-changed == 'true'
++      || needs.detect-changes.outputs.workflow-changed == 'true' ||
++      needs.detect-changes.outputs.any-code-changed == 'true' ) )))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -484,16 +494,12 @@
+     # Note: !cancelled() is required because detect-changes is skipped on workflow_dispatch,
+     # and without it, this job would also be skipped even though its condition includes workflow_dispatch.
+     # See: https://github.com/actions/runner/issues/491
+-    if: |
+-      !cancelled() && (
+-        needs.cargo-lock.result == 'success' && (
+-          github.event_name == 'workflow_dispatch' ||
+-          needs.detect-changes.outputs.any-code-changed == 'true' ||
+-          needs.detect-changes.outputs.rs-changed == 'true' ||
+-          needs.detect-changes.outputs.toml-changed == 'true' ||
+-          needs.detect-changes.outputs.workflow-changed == 'true'
+-        )
+-      )
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && ( needs.cargo-lock.result == 'success' && ( github.event_name == 'workflow_dispatch' ||
++      needs.detect-changes.outputs.any-code-changed == 'true' || needs.detect-changes.outputs.rs-changed ==
++      'true' || needs.detect-changes.outputs.toml-changed == 'true' ||
++      needs.detect-changes.outputs.workflow-changed == 'true' ) )))
+     strategy:
+       fail-fast: false
+       matrix:
+@@ -558,16 +564,12 @@
+     # Note: !cancelled() is required because detect-changes is skipped on workflow_dispatch,
+     # and without it, this job would also be skipped even though its condition includes workflow_dispatch.
+     # See: https://github.com/actions/runner/issues/491
+-    if: |
+-      !cancelled() && (
+-        needs.cargo-lock.result == 'success' && (
+-          github.event_name == 'workflow_dispatch' ||
+-          needs.detect-changes.outputs.any-code-changed == 'true' ||
+-          needs.detect-changes.outputs.rs-changed == 'true' ||
+-          needs.detect-changes.outputs.toml-changed == 'true' ||
+-          needs.detect-changes.outputs.workflow-changed == 'true'
+-        )
+-      )
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && ( needs.cargo-lock.result == 'success' && ( github.event_name == 'workflow_dispatch' ||
++      needs.detect-changes.outputs.any-code-changed == 'true' || needs.detect-changes.outputs.rs-changed ==
++      'true' || needs.detect-changes.outputs.toml-changed == 'true' ||
++      needs.detect-changes.outputs.workflow-changed == 'true' ) )))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -611,14 +613,11 @@
+     needs: [detect-changes, cargo-lock]
+     env:
+       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+-    if: |
+-      !cancelled() && (
+-        needs.cargo-lock.result == 'success' && (
+-          github.event_name == 'workflow_dispatch' ||
+-          needs.detect-changes.outputs.rs-changed == 'true' ||
+-          needs.detect-changes.outputs.toml-changed == 'true'
+-        )
+-      )
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && ( needs.cargo-lock.result == 'success' && ( github.event_name == 'workflow_dispatch' ||
++      needs.detect-changes.outputs.rs-changed == 'true' || needs.detect-changes.outputs.toml-changed == 'true'
++      ) )))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -680,7 +679,10 @@
+       group: ${{ github.workflow }}-${{ github.ref }}-build
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [lint, test, script-tests]
+-    if: ${{ !cancelled() && needs.lint.result == 'success' && needs.test.result == 'success' && needs.script-tests.result == 'success' }}
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && needs.lint.result == 'success' && needs.test.result == 'success' && needs.script-tests.result ==
++      'success'))
+     steps:
+       - uses: actions/checkout@v6
+         with:
+@@ -729,12 +731,11 @@
+       group: ${{ github.workflow }}-main-write
+       cancel-in-progress: false
+     # Note: !cancelled() ensures consistent behavior with other jobs that depend on skipped jobs.
+-    if: |
+-      !cancelled() &&
+-      github.event_name == 'push' &&
+-      github.ref == 'refs/heads/main' &&
+-      needs.release-preflight.result == 'success' &&
+-      needs.build.result == 'success'
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (!cancelled() && github.event_name == 'push' &&
++      github.ref == 'refs/heads/main' && needs.release-preflight.result == 'success' && needs.build.result ==
++      'success')
+     runs-on: ubuntu-24.04
+     # Covers the crate build, publish, smoke test, and a cold Docker build.
+     timeout-minutes: 60
+@@ -744,12 +745,20 @@
+     permissions:
+       contents: write
+     steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       # This job pushes the version bump commit and tag back to `main`, so the
+       # checkout explicitly persists credentials for these serialized writers.
+       - uses: actions/checkout@v6
+         with:
+           fetch-depth: 0
+-          token: ${{ secrets.GITHUB_TOKEN }}
++          token: ${{ steps.gh.outputs.token }}
+           persist-credentials: true
+ 
+       - name: Setup Rust
+@@ -773,7 +782,7 @@
+         id: check
+         env:
+           HAS_FRAGMENTS: ${{ steps.bump_type.outputs.has_fragments }}
+-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GITHUB_TOKEN: ${{ steps.gh.outputs.token }}
+         run: rust-script scripts/check-release-needed.rs
+ 
+       - name: Collect changelog and bump version
+@@ -876,7 +885,7 @@
+             steps.publish-crate.outputs.publish_result == 'success'
+           )
+         env:
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_TOKEN: ${{ steps.gh.outputs.token }}
+           DOCKER_HUB_URL: ${{ steps.dockerhub.outputs.docker_hub_url }}
+           REPOSITORY: ${{ github.repository }}
+           RELEASE_VERSION: ${{ steps.release-metadata.outputs.version }}
+@@ -903,12 +912,11 @@
+       cancel-in-progress: false
+     # Note: !cancelled() is required to evaluate the condition when dependencies may be skipped.
+     # The build job ensures lint and test passed before this job runs.
+-    if: |
+-      !cancelled() &&
+-      github.event_name == 'workflow_dispatch' &&
+-      github.event.inputs.release_mode == 'instant' &&
+-      needs.release-preflight.result == 'success' &&
+-      needs.build.result == 'success'
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (!cancelled() && github.event_name ==
++      'workflow_dispatch' && github.event.inputs.release_mode == 'instant' && needs.release-preflight.result
++      == 'success' && needs.build.result == 'success')
+     runs-on: ubuntu-24.04
+     # Covers the crate build, publish, smoke test, and a cold Docker build.
+     timeout-minutes: 60
+@@ -918,12 +926,20 @@
+     permissions:
+       contents: write
+     steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       # This job pushes the version bump commit and tag back to `main`, so the
+       # checkout explicitly persists credentials for these serialized writers.
+       - uses: actions/checkout@v6
+         with:
+           fetch-depth: 0
+-          token: ${{ secrets.GITHUB_TOKEN }}
++          token: ${{ steps.gh.outputs.token }}
+           persist-credentials: true
+ 
+       - name: Setup Rust
+@@ -1011,7 +1027,7 @@
+             steps.version.outputs.already_released == 'true') &&
+           steps.publish-crate.outputs.publish_result == 'success'
+         env:
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_TOKEN: ${{ steps.gh.outputs.token }}
+           DOCKER_HUB_URL: ${{ steps.dockerhub.outputs.docker_hub_url }}
+           REPOSITORY: ${{ github.repository }}
+           RELEASE_VERSION: ${{ steps.version.outputs.new_version }}
+@@ -1030,11 +1046,12 @@
+   docker-publish:
+     name: Publish Docker / ${{ matrix.platform }}
+     needs: [auto-release, manual-release, release-preflight]
+-    if: |
+-      !cancelled() &&
+-      needs.release-preflight.result == 'success' &&
+-      (needs.auto-release.result == 'success' || needs.manual-release.result == 'success') &&
+-      (needs.auto-release.outputs.docker_enabled == 'true' || needs.manual-release.outputs.docker_enabled == 'true')
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (!cancelled() && needs.release-preflight.result ==
++      'success' && (needs.auto-release.result == 'success' || needs.manual-release.result == 'success') &&
++      (needs.auto-release.outputs.docker_enabled == 'true' || needs.manual-release.outputs.docker_enabled ==
++      'true'))
+     strategy:
+       fail-fast: false
+       matrix:
+@@ -1100,10 +1117,10 @@
+   docker-merge-manifest:
+     name: Publish Docker manifest
+     needs: [auto-release, manual-release, docker-publish, release-preflight]
+-    if: |
+-      !cancelled() &&
+-      needs.release-preflight.result == 'success' &&
+-      needs.docker-publish.result == 'success'
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (!cancelled() && needs.release-preflight.result ==
++      'success' && needs.docker-publish.result == 'success')
+     runs-on: ubuntu-24.04
+     timeout-minutes: 10
+     env:
+@@ -1145,16 +1162,28 @@
+   # === MANUAL CHANGELOG PR ===
+   changelog-pr:
+     name: Create Changelog PR
+-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_mode == 'changelog-pr'
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (github.event_name == 'workflow_dispatch' &&
++      github.event.inputs.release_mode == 'changelog-pr')
+     runs-on: ubuntu-24.04
+     timeout-minutes: 10
+     concurrency:
+       group: ${{ github.workflow }}-main-write
+       cancel-in-progress: false
+     permissions:
++      actions: write
+       contents: write
+       pull-requests: write
+     steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       - uses: actions/checkout@v6
+         with:
+           persist-credentials: false
+@@ -1177,9 +1206,10 @@
+         run: rust-script scripts/create-changelog-fragment.rs --bump-type "$BUMP_TYPE" --description "$DESCRIPTION"
+ 
+       - name: Create Pull Request
++        id: automation-pr
+         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+         with:
+-          token: ${{ secrets.GITHUB_TOKEN }}
++          token: ${{ steps.gh.outputs.token }}
+           commit-message: 'chore: add changelog for manual ${{ github.event.inputs.bump_type }} release'
+           branch: changelog-manual-release-${{ github.run_id }}
+           delete-branch: true
+@@ -1198,6 +1228,15 @@
+             1. Review the changelog fragment in this PR
+             2. Merge this PR to main
+             3. The automated release workflow will publish to crates.io and create a GitHub release
++
++      - name: Dispatch checks for automation pull request
++        if: steps.automation-pr.outputs.pull-request-number != ''
++        uses: link-foundation/.github/actions/dispatch-checks@main
++        with:
++          ref: ${{ steps.automation-pr.outputs.pull-request-branch }}
++          workflows: release.yml
++          token: ${{ steps.gh.outputs.token }}
++          triggers-workflows: ${{ steps.gh.outputs.triggers-workflows }}
+ 
+   # === DEPLOY DOCUMENTATION ===
+   # Deploy Rust API documentation to GitHub Pages after a successful package build.
+@@ -1216,12 +1255,11 @@
+     concurrency:
+       group: ${{ github.workflow }}-main-write
+       cancel-in-progress: false
+-    if: |
+-      !cancelled() &&
+-      needs.build.result == 'success' && (
+-        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+-        (github.event_name == 'workflow_dispatch' && github.event.inputs.release_mode == 'instant')
+-      )
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (!cancelled() && needs.build.result == 'success' &&
++      ( (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name ==
++      'workflow_dispatch' && github.event.inputs.release_mode == 'instant') ))
+     runs-on: ubuntu-24.04
+     timeout-minutes: 15
+     permissions:
+--- /dev/null
++++ b/.github/workflows/automation-pr.yml
+@@ -0,0 +1,66 @@
++name: Automation documentation pull request
++on:
++  workflow_dispatch:
++    inputs:
++      mode:
++        description: Choose create-pr to request a documentation update.
++        type: choice
++        default: checks
++        options: [checks, create-pr]
++      description:
++        description: Documentation text to append to docs/automation.md.
++        type: string
++        default: Automated documentation update.
++permissions:
++  contents: read
++concurrency:
++  group: automation-documentation-pr
++  cancel-in-progress: false
++jobs:
++  update:
++    if: >-
++      inputs.mode == 'create-pr' &&
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
++    runs-on: ubuntu-24.04
++    timeout-minutes: 10
++    permissions:
++      contents: write
++      pull-requests: write
++      actions: write
++    steps:
++      - uses: actions/checkout@v6
++        with:
++          persist-credentials: false
++      - uses: link-foundation/.github/actions/resolve-github-token@main
++        id: gh
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
++      - name: Prepare documentation update
++        env:
++          DESCRIPTION: ${{ inputs.description }}
++        run: |
++          python3 - <<'PY'
++          import os
++          from pathlib import Path
++          path = Path('docs/automation.md')
++          path.parent.mkdir(parents=True, exist_ok=True)
++          with path.open('a') as stream:
++              stream.write(os.environ['DESCRIPTION'] + '\n')
++          PY
++      - uses: peter-evans/create-pull-request@v8
++        id: pr
++        with:
++          token: ${{ steps.gh.outputs.token }}
++          branch: automation/documentation
++          title: 'docs: automation update'
++          commit-message: 'docs: automation update'
++      - uses: link-foundation/.github/actions/dispatch-checks@main
++        if: steps.pr.outputs.pull-request-number != ''
++        with:
++          ref: ${{ steps.pr.outputs.pull-request-branch }}
++          workflows: release.yml
++          token: ${{ steps.gh.outputs.token }}
++          triggers-workflows: ${{ steps.gh.outputs.triggers-workflows }}

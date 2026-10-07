@@ -1,0 +1,43 @@
+name: Automation pull request
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+concurrency:
+  group: automation-pull-request
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: link-foundation/.github/actions/resolve-github-token@main
+        id: gh
+        with:
+          app-id: ${{ vars.AUTOMATION_APP_ID }}
+          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+          token: ${{ secrets.AUTOMATION_TOKEN }}
+          default-token: ${{ github.token }}
+      - name: Update generated files
+        env:
+          GH_TOKEN: ${{ steps.gh.outputs.token }}
+        run: ./scripts/update-generated-files.sh
+      - uses: peter-evans/create-pull-request@v8
+        id: pr
+        with:
+          token: ${{ steps.gh.outputs.token }}
+          branch: automation/update
+          title: 'chore: update generated files'
+          commit-message: 'chore: update generated files'
+      - uses: link-foundation/.github/actions/dispatch-checks@main
+        if: steps.pr.outputs.pull-request-number != ''
+        with:
+          ref: ${{ steps.pr.outputs.pull-request-branch }}
+          workflows: release.yml
+          token: ${{ steps.gh.outputs.token }}
+          triggers-workflows: ${{ steps.gh.outputs.triggers-workflows }}

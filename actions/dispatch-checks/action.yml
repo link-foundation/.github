@@ -1,0 +1,48 @@
+name: Dispatch pull request checks
+description: Start checks-only workflows on a default-token pull request head and report their run URLs.
+inputs:
+  ref:
+    description: Pull request head branch in the target repository.
+    required: true
+  workflows:
+    description: Comma or newline separated workflow filenames; each must accept mode=checks on the default branch.
+    required: true
+  token:
+    description: Resolver token with Actions write and Contents read permission.
+    required: true
+  triggers-workflows:
+    description: Resolver output; true makes this action a no-op.
+    required: false
+    default: 'false'
+  repository:
+    description: Repository containing the branch and workflows.
+    required: false
+    default: ${{ github.repository }}
+  wait-seconds:
+    description: Maximum seconds to wait for each run to be created.
+    required: false
+    default: '120'
+  poll-seconds:
+    description: Delay between run creation polls.
+    required: false
+    default: '3'
+outputs:
+  run-urls:
+    description: JSON array of dispatched run URLs, also written to the job summary.
+    value: ${{ steps.dispatch.outputs.run-urls }}
+runs:
+  using: composite
+  steps:
+    - name: Dispatch checks and locate head commit runs
+      id: dispatch
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        TARGET_REPOSITORY: ${{ inputs.repository }}
+        INPUT_REF: ${{ inputs.ref }}
+        WORKFLOWS: ${{ inputs.workflows }}
+        TRIGGERS_WORKFLOWS: ${{ inputs.triggers-workflows }}
+        WAIT_SECONDS: ${{ inputs.wait-seconds }}
+        POLL_SECONDS: ${{ inputs.poll-seconds }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: python3 "$ACTION_PATH/main.py"

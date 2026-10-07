@@ -1,0 +1,316 @@
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -8,10 +8,16 @@
+     types: [opened, synchronize, reopened]
+   workflow_dispatch:
+     inputs:
++      mode:
++        description: Checks only, or explicitly enable release and automation jobs.
++        type: choice
++        default: checks
++        options: [checks, release]
+       bump_type:
+         description: 'Version bump type'
+         required: true
+         type: choice
++        default: patch
+         options:
+           - patch
+           - minor
+@@ -76,16 +82,13 @@
+     needs: [detect-changes]
+     # always() && !cancelled() lets this evaluate even though detect-changes is
+     # skipped for workflow_dispatch; otherwise the skip would propagate here.
+-    if: |
+-      always() && !cancelled() && (
+-        github.event_name == 'push' ||
+-        github.event_name == 'workflow_dispatch' ||
+-        needs.detect-changes.outputs.php-changed == 'true' ||
+-        needs.detect-changes.outputs.tests-changed == 'true' ||
+-        needs.detect-changes.outputs.docs-changed == 'true' ||
+-        needs.detect-changes.outputs.package-changed == 'true' ||
+-        needs.detect-changes.outputs.workflow-changed == 'true'
+-      )
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (always() &&
++      !cancelled() && ( github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
++      needs.detect-changes.outputs.php-changed == 'true' || needs.detect-changes.outputs.tests-changed ==
++      'true' || needs.detect-changes.outputs.docs-changed == 'true' ||
++      needs.detect-changes.outputs.package-changed == 'true' || needs.detect-changes.outputs.workflow-changed
++      == 'true' )))
+     steps:
+       - uses: actions/checkout@v4
+         with:
+@@ -146,6 +149,14 @@
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
+     steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       - uses: actions/checkout@v4
+         with:
+           persist-credentials: false
+@@ -164,11 +175,11 @@
+             ${{
+               (
+                 (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+-                github.event_name == 'workflow_dispatch'
++                (github.event_name == 'workflow_dispatch' && inputs.mode == 'release')
+               ) && 'release' || 'report'
+             }}
+           GITHUB_REPOSITORY: ${{ github.repository }}
+-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GITHUB_TOKEN: ${{ steps.gh.outputs.token }}
+         run: php scripts/preflight-credentials.php
+ 
+   # === TEST ===
+@@ -177,15 +188,12 @@
+     runs-on: ubuntu-latest
+     timeout-minutes: 30
+     needs: [detect-changes]
+-    if: |
+-      always() && !cancelled() && (
+-        github.event_name == 'push' ||
+-        github.event_name == 'workflow_dispatch' ||
+-        needs.detect-changes.outputs.php-changed == 'true' ||
+-        needs.detect-changes.outputs.tests-changed == 'true' ||
+-        needs.detect-changes.outputs.package-changed == 'true' ||
+-        needs.detect-changes.outputs.workflow-changed == 'true'
+-      )
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (always() &&
++      !cancelled() && ( github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
++      needs.detect-changes.outputs.php-changed == 'true' || needs.detect-changes.outputs.tests-changed ==
++      'true' || needs.detect-changes.outputs.package-changed == 'true' ||
++      needs.detect-changes.outputs.workflow-changed == 'true' )))
+     strategy:
+       fail-fast: false
+       matrix:
+@@ -225,7 +233,9 @@
+     runs-on: ubuntu-latest
+     timeout-minutes: 10
+     needs: [detect-changes]
+-    if: github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'))
+     steps:
+       - uses: actions/checkout@v4
+         with:
+@@ -249,13 +259,13 @@
+ 
+       - name: Ensure the version was not bumped by hand
+         env:
+-          GITHUB_BASE_REF: ${{ github.base_ref }}
++          GITHUB_BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+         run: php scripts/check-version-modification.php
+ 
+       - name: Validate changelog fragment
+         env:
+           GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+-          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
++          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+         run: php scripts/validate-changeset.php
+ 
+   # === BUILD ===
+@@ -266,15 +276,11 @@
+     runs-on: ubuntu-latest
+     timeout-minutes: 20
+     needs: [detect-changes, lint, test]
+-    if: |
+-      always() && (
+-        github.event_name == 'push' ||
+-        github.event_name == 'workflow_dispatch' ||
+-        (
+-          (needs.lint.result == 'success' || needs.lint.result == 'skipped') &&
+-          (needs.test.result == 'success' || needs.test.result == 'skipped')
+-        )
+-      )
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (always() && (
++      github.event_name == 'push' || github.event_name == 'workflow_dispatch' || ( (needs.lint.result ==
++      'success' || needs.lint.result == 'skipped') && (needs.test.result == 'success' || needs.test.result ==
++      'skipped') ) )))
+     steps:
+       - uses: actions/checkout@v4
+         with:
+@@ -313,15 +319,23 @@
+     # A refused precondition must stop the release even when everything else
+     # is green: `result == 'success'`, not mere non-failure, is the gate
+     # (issue #11).
+-    if: |
+-      always() && !cancelled() &&
+-      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+-      needs.release-preflight.result == 'success'
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (always() && !cancelled() && github.event_name ==
++      'push' && github.ref == 'refs/heads/main' && needs.release-preflight.result == 'success')
+     runs-on: ubuntu-latest
+     timeout-minutes: 30
+     permissions:
+       contents: write
+     steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       # This checkout keeps credentials in .git/config on purpose:
+       # scripts/version-and-commit.php runs `git push` to publish the version
+       # bump, which needs the token wired into the remote. Every other
+@@ -331,7 +345,7 @@
+         with:
+           persist-credentials: true
+           fetch-depth: 0
+-          token: ${{ secrets.GITHUB_TOKEN }}
++          token: ${{ steps.gh.outputs.token }}
+ 
+       - name: Setup PHP
+         uses: shivammathur/setup-php@v2
+@@ -353,7 +367,7 @@
+         env:
+           DECIDE_BUDGET_SECONDS: 300
+           GITHUB_REPOSITORY: ${{ github.repository }}
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_TOKEN: ${{ steps.gh.outputs.token }}
+         run: |
+           bash scripts/run-with-budget-warning.sh \
+             "$DECIDE_BUDGET_SECONDS" "Release decision" \
+@@ -390,7 +404,7 @@
+         env:
+           GITHUB_RELEASE_BUDGET_SECONDS: 300
+           GITHUB_REPOSITORY: ${{ github.repository }}
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_TOKEN: ${{ steps.gh.outputs.token }}
+         run: |
+           bash scripts/run-with-budget-warning.sh \
+             "$GITHUB_RELEASE_BUDGET_SECONDS" "GitHub release" \
+@@ -403,18 +417,24 @@
+     # always() && !cancelled() prevents the skipped detect-changes dependency
+     # from propagating; explicit result checks gate release behind green CI
+     # and a passed preflight (issue #11).
+-    if: |
+-      always() && !cancelled() &&
+-      github.event_name == 'workflow_dispatch' &&
+-      needs.lint.result == 'success' &&
+-      needs.test.result == 'success' &&
+-      needs.build.result == 'success' &&
+-      needs.release-preflight.result == 'success'
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (always() && !cancelled() && github.event_name ==
++      'workflow_dispatch' && needs.lint.result == 'success' && needs.test.result == 'success' &&
++      needs.build.result == 'success' && needs.release-preflight.result == 'success')
+     runs-on: ubuntu-latest
+     timeout-minutes: 30
+     permissions:
+       contents: write
+     steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       # This checkout keeps credentials in .git/config on purpose:
+       # scripts/version-and-commit.php runs `git push` to publish the version
+       # bump, which needs the token wired into the remote. Every other
+@@ -424,7 +444,7 @@
+         with:
+           persist-credentials: true
+           fetch-depth: 0
+-          token: ${{ secrets.GITHUB_TOKEN }}
++          token: ${{ steps.gh.outputs.token }}
+ 
+       - name: Setup PHP
+         uses: shivammathur/setup-php@v2
+@@ -470,7 +490,7 @@
+         env:
+           GITHUB_RELEASE_BUDGET_SECONDS: 300
+           GITHUB_REPOSITORY: ${{ github.repository }}
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_TOKEN: ${{ steps.gh.outputs.token }}
+         run: |
+           bash scripts/run-with-budget-warning.sh \
+             "$GITHUB_RELEASE_BUDGET_SECONDS" "GitHub release" \
+--- /dev/null
++++ b/.github/workflows/automation-pr.yml
+@@ -0,0 +1,66 @@
++name: Automation documentation pull request
++on:
++  workflow_dispatch:
++    inputs:
++      mode:
++        description: Choose create-pr to request a documentation update.
++        type: choice
++        default: checks
++        options: [checks, create-pr]
++      description:
++        description: Documentation text to append to docs/automation.md.
++        type: string
++        default: Automated documentation update.
++permissions:
++  contents: read
++concurrency:
++  group: automation-documentation-pr
++  cancel-in-progress: false
++jobs:
++  update:
++    if: >-
++      inputs.mode == 'create-pr' &&
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
++    runs-on: ubuntu-24.04
++    timeout-minutes: 10
++    permissions:
++      contents: write
++      pull-requests: write
++      actions: write
++    steps:
++      - uses: actions/checkout@v6
++        with:
++          persist-credentials: false
++      - uses: link-foundation/.github/actions/resolve-github-token@main
++        id: gh
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
++      - name: Prepare documentation update
++        env:
++          DESCRIPTION: ${{ inputs.description }}
++        run: |
++          python3 - <<'PY'
++          import os
++          from pathlib import Path
++          path = Path('docs/automation.md')
++          path.parent.mkdir(parents=True, exist_ok=True)
++          with path.open('a') as stream:
++              stream.write(os.environ['DESCRIPTION'] + '\n')
++          PY
++      - uses: peter-evans/create-pull-request@v8
++        id: pr
++        with:
++          token: ${{ steps.gh.outputs.token }}
++          branch: automation/documentation
++          title: 'docs: automation update'
++          commit-message: 'docs: automation update'
++      - uses: link-foundation/.github/actions/dispatch-checks@main
++        if: steps.pr.outputs.pull-request-number != ''
++        with:
++          ref: ${{ steps.pr.outputs.pull-request-branch }}
++          workflows: release.yml
++          token: ${{ steps.gh.outputs.token }}
++          triggers-workflows: ${{ steps.gh.outputs.triggers-workflows }}

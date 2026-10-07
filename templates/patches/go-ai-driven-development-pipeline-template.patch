@@ -1,0 +1,264 @@
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -7,18 +7,25 @@
+     types: [opened, synchronize, reopened]
+   workflow_dispatch:
+     inputs:
++      mode:
++        description: Checks only, or explicitly enable release and automation jobs.
++        type: choice
++        default: checks
++        options: [checks, release]
+       release_mode:
+         description: 'Release mode'
+         required: true
+         type: choice
+-        default: 'instant'
++        default: checks
+         options:
++          - checks
+           - instant
+           - changeset
+       bump_type:
+         description: 'Version bump type (for instant mode)'
+         required: true
+         type: choice
++        default: patch
+         options:
+           - patch
+           - minor
+@@ -75,7 +82,9 @@
+       group: check-${{ github.workflow }}-${{ github.ref }}-changeset-check
+       cancel-in-progress: true
+     needs: [detect-changes]
+-    if: github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'))
+     steps:
+       - name: Checkout
+         uses: actions/checkout@v4
+@@ -89,9 +98,9 @@
+ 
+       - name: Check for changeset
+         env:
+-          GITHUB_BASE_REF: ${{ github.base_ref }}
++          GITHUB_BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+           GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+-          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
++          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+         run: bun scripts/validate-changeset.mjs
+ 
+   # === LINT AND FORMAT CHECK ===
+@@ -104,14 +113,12 @@
+       group: check-${{ github.workflow }}-${{ github.ref }}-lint
+       cancel-in-progress: true
+     needs: [detect-changes]
+-    if: |
+-      github.event_name == 'push' ||
+-      github.event_name == 'workflow_dispatch' ||
+-      needs.detect-changes.outputs.go-changed == 'true' ||
+-      needs.detect-changes.outputs.mod-changed == 'true' ||
+-      needs.detect-changes.outputs.mjs-changed == 'true' ||
+-      needs.detect-changes.outputs.docs-changed == 'true' ||
+-      needs.detect-changes.outputs.workflow-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
++      needs.detect-changes.outputs.go-changed == 'true' || needs.detect-changes.outputs.mod-changed == 'true'
++      || needs.detect-changes.outputs.mjs-changed == 'true' || needs.detect-changes.outputs.docs-changed ==
++      'true' || needs.detect-changes.outputs.workflow-changed == 'true'))
+     steps:
+       - name: Checkout
+         uses: actions/checkout@v4
+@@ -159,7 +166,10 @@
+       cancel-in-progress: true
+     needs: [detect-changes, changeset-check]
+     # Run if: push event, workflow_dispatch, OR changeset-check succeeded, OR changeset-check was skipped (docs-only PR)
+-    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || needs.changeset-check.result == 'success' || needs.changeset-check.result == 'skipped') }}
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
++      needs.changeset-check.result == 'success' || needs.changeset-check.result == 'skipped')))
+     env:
+       # Step conditions cannot read the secrets context directly.
+       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+@@ -233,13 +243,24 @@
+       cancel-in-progress: false
+       queue: max
+     needs: [lint, test, build]
+-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+-    steps:
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (github.event_name == 'push' && github.ref ==
++      'refs/heads/main')
++    steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       - name: Checkout
+         uses: actions/checkout@v4
+         with:
+           fetch-depth: 0
+-          token: ${{ secrets.GITHUB_TOKEN }}
++          token: ${{ steps.gh.outputs.token }}
+ 
+       - name: Set up Bun
+         uses: oven-sh/setup-bun@v2
+@@ -283,7 +304,7 @@
+       - name: Create GitHub Release
+         if: steps.check_changesets.outputs.has_changesets == 'true' && steps.version.outputs.version_committed == 'true'
+         env:
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_TOKEN: ${{ steps.gh.outputs.token }}
+           VERSION: ${{ steps.version.outputs.new_version }}
+         run: bun scripts/create-github-release.mjs --version "$VERSION"
+ 
+@@ -298,13 +319,24 @@
+       cancel-in-progress: false
+       queue: max
+     needs: [lint, test, build]
+-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_mode == 'instant'
+-    steps:
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (github.event_name == 'workflow_dispatch' &&
++      github.event.inputs.release_mode == 'instant')
++    steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       - name: Checkout
+         uses: actions/checkout@v4
+         with:
+           fetch-depth: 0
+-          token: ${{ secrets.GITHUB_TOKEN }}
++          token: ${{ steps.gh.outputs.token }}
+ 
+       - name: Set up Bun
+         uses: oven-sh/setup-bun@v2
+@@ -333,7 +365,7 @@
+       - name: Create GitHub Release
+         if: steps.version.outputs.version_committed == 'true'
+         env:
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_TOKEN: ${{ steps.gh.outputs.token }}
+           VERSION: ${{ steps.version.outputs.new_version }}
+         run: bun scripts/create-github-release.mjs --version "$VERSION"
+ 
+@@ -348,13 +380,24 @@
+       cancel-in-progress: false
+       queue: max
+     needs: [lint, test, build]
+-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_mode == 'changeset'
+-    steps:
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (github.event_name == 'workflow_dispatch' &&
++      github.event.inputs.release_mode == 'changeset')
++    steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       - name: Checkout
+         uses: actions/checkout@v4
+         with:
+           fetch-depth: 0
+-          token: ${{ secrets.GITHUB_TOKEN }}
++          token: ${{ steps.gh.outputs.token }}
+ 
+       - name: Set up Bun
+         uses: oven-sh/setup-bun@v2
+@@ -396,6 +439,6 @@
+       - name: Create GitHub Release
+         if: steps.version.outputs.version_committed == 'true'
+         env:
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_TOKEN: ${{ steps.gh.outputs.token }}
+           VERSION: ${{ steps.version.outputs.new_version }}
+         run: bun scripts/create-github-release.mjs --version "$VERSION"
+--- /dev/null
++++ b/.github/workflows/automation-pr.yml
+@@ -0,0 +1,66 @@
++name: Automation documentation pull request
++on:
++  workflow_dispatch:
++    inputs:
++      mode:
++        description: Choose create-pr to request a documentation update.
++        type: choice
++        default: checks
++        options: [checks, create-pr]
++      description:
++        description: Documentation text to append to docs/automation.md.
++        type: string
++        default: Automated documentation update.
++permissions:
++  contents: read
++concurrency:
++  group: automation-documentation-pr
++  cancel-in-progress: false
++jobs:
++  update:
++    if: >-
++      inputs.mode == 'create-pr' &&
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
++    runs-on: ubuntu-24.04
++    timeout-minutes: 10
++    permissions:
++      contents: write
++      pull-requests: write
++      actions: write
++    steps:
++      - uses: actions/checkout@v6
++        with:
++          persist-credentials: false
++      - uses: link-foundation/.github/actions/resolve-github-token@main
++        id: gh
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
++      - name: Prepare documentation update
++        env:
++          DESCRIPTION: ${{ inputs.description }}
++        run: |
++          python3 - <<'PY'
++          import os
++          from pathlib import Path
++          path = Path('docs/automation.md')
++          path.parent.mkdir(parents=True, exist_ok=True)
++          with path.open('a') as stream:
++              stream.write(os.environ['DESCRIPTION'] + '\n')
++          PY
++      - uses: peter-evans/create-pull-request@v8
++        id: pr
++        with:
++          token: ${{ steps.gh.outputs.token }}
++          branch: automation/documentation
++          title: 'docs: automation update'
++          commit-message: 'docs: automation update'
++      - uses: link-foundation/.github/actions/dispatch-checks@main
++        if: steps.pr.outputs.pull-request-number != ''
++        with:
++          ref: ${{ steps.pr.outputs.pull-request-branch }}
++          workflows: release.yml
++          token: ${{ steps.gh.outputs.token }}
++          triggers-workflows: ${{ steps.gh.outputs.triggers-workflows }}
