@@ -2,3 +2,6 @@ __pycache__/
 ci-logs/
 experiments/*-upstream.yml
 experiments/create-app-token-action.yml
+experiments/*-migrated.yml
+experiments/migration-debug.yml
+experiments/template-validation/

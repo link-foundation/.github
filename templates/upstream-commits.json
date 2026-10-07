@@ -1,0 +1,10 @@
+{
+  "cpp-ai-driven-development-pipeline-template": "16bac388012443949cc182f50a42f042fcbaf6ce",
+  "csharp-ai-driven-development-pipeline-template": "4cc372ebf2075a0c948b46881143f7d66f0f0e7e",
+  "go-ai-driven-development-pipeline-template": "9709ce189b0afc27dfc1223f9fec139109ba6060",
+  "java-ai-driven-development-pipeline-template": "b3c7ce9a0a4ecd8db796a4fe660031d9fa4acbab",
+  "js-ai-driven-development-pipeline-template": "1e43fdb4fb26d69376b8663674c170212eb01765",
+  "php-ai-driven-development-pipeline-template": "73c1ba102da6bd7740c6b4a79ab5ea1d09559986",
+  "python-ai-driven-development-pipeline-template": "1e929ef857debdd290a90bfdafac1bae3ed8cd50",
+  "rust-ai-driven-development-pipeline-template": "d74660b0ddcaa991ec9299892bfb353eee203d13"
+}

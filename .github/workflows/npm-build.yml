@@ -1,10 +1,87 @@
-name: Npm Build
+name: Shared action checks
 
 on:
   pull_request:
-    types: [opened, reopened, edited, synchronize]
+    types: [opened, reopened, synchronize]
+  push:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Run checks only.
+        type: choice
+        default: checks
+        options: [checks]
+
+permissions:
+  contents: read
 
 jobs:
-  main:
-    uses: deep-foundation/workflows/.github/workflows/npm-build.yml@main
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install validation dependencies
+        run: python3 -m pip install -r tests/requirements.txt
+      - name: Test actions and caller contracts
+        run: python3 -m unittest discover -s tests -v
+      - name: Lint workflow syntax
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v1.7.12 --repo rhysd/actionlint \
+            --pattern actionlint_1.7.12_linux_amd64.tar.gz --dir "$RUNNER_TEMP"
+          tar -xzf "$RUNNER_TEMP/actionlint_1.7.12_linux_amd64.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/actionlint" .github/workflows/*.yml examples/*.yml workflow-templates/*.yml
+      - name: Apply and validate all pinned template patches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/validate-template-patches.py "$RUNNER_TEMP/actionlint"
+  resolver:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      APP_ID: ${{ vars.AUTOMATION_APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Default layer without any optional credentials
+        id: default
+        uses: ./actions/resolve-github-token
+      - name: Supplied token layer (selection smoke test)
+        id: token
+        uses: ./actions/resolve-github-token
+        with:
+          token: ${{ secrets.AUTOMATION_TOKEN || github.token }}
+      - name: App layer with the installed test app
+        id: app
+        if: env.APP_ID != '' && env.APP_PRIVATE_KEY != ''
+        uses: ./actions/resolve-github-token
+        with:
+          app-id: ${{ vars.AUTOMATION_APP_ID }}
+          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+      - name: Assert credential layers and default behavior
+        env:
+          DEFAULT_LAYER: ${{ steps.default.outputs.layer }}
+          DEFAULT_TRIGGERS: ${{ steps.default.outputs.triggers-workflows }}
+          DEFAULT_CREATE: ${{ steps.default.outputs.can-create-repositories }}
+          TOKEN_LAYER: ${{ steps.token.outputs.layer }}
+          APP_LAYER: ${{ steps.app.outputs.layer }}
+          APP_OUTCOME: ${{ steps.app.outcome }}
+        run: |
+          test "$DEFAULT_LAYER" = default
+          test "$DEFAULT_TRIGGERS" = false
+          test "$DEFAULT_CREATE" = false
+          test "$TOKEN_LAYER" = token
+          if [ "$APP_OUTCOME" != skipped ]; then test "$APP_LAYER" = app; fi
+      - name: Report unavailable live app coverage
+        if: env.APP_ID == '' || env.APP_PRIVATE_KEY == ''
+        run: echo 'Live App minting was not exercised; configure the optional test App to enable it.' >> "$GITHUB_STEP_SUMMARY"

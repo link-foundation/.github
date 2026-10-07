@@ -1,0 +1,455 @@
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -18,18 +18,25 @@
+     types: [opened, synchronize, reopened]
+   workflow_dispatch:
+     inputs:
++      mode:
++        description: Checks only, or explicitly enable release and automation jobs.
++        type: choice
++        default: checks
++        options: [checks, release]
+       release_mode:
+         description: 'Manual release mode'
+         required: true
+         type: choice
+-        default: 'instant'
++        default: checks
+         options:
++          - checks
+           - instant
+           - changelog-pr
+       bump_type:
+         description: 'Version bump type'
+         required: true
+         type: choice
++        default: patch
+         options:
+           - patch
+           - minor
+@@ -104,7 +111,9 @@
+       group: ${{ github.workflow }}-${{ github.ref }}-validate-docs
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [detect-changes]
+-    if: needs.detect-changes.outputs.docs-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (needs.detect-changes.outputs.docs-changed == 'true'))
+     steps:
+       - uses: actions/checkout@v7
+         with:
+@@ -131,6 +140,14 @@
+       # without writing anything.
+       contents: write
+     steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       - uses: actions/checkout@v7
+         with:
+           persist-credentials: false
+@@ -141,10 +158,10 @@
+             ${{
+               (
+                 (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+-                (github.event_name == 'workflow_dispatch' && github.event.inputs.release_mode == 'instant')
++                ((github.event_name == 'workflow_dispatch' && inputs.mode == 'release') && github.event.inputs.release_mode == 'instant')
+               ) && 'release' || 'report'
+             }}
+-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GITHUB_TOKEN: ${{ steps.gh.outputs.token }}
+           NUGET_PUBLISH: ${{ vars.NUGET_PUBLISH }}
+           NUGET_PACKAGE_ID: ${{ vars.NUGET_PACKAGE_ID }}
+           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+@@ -163,7 +180,9 @@
+       group: ${{ github.workflow }}-${{ github.ref }}-changelog
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [detect-changes]
+-    if: github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'))
+     steps:
+       - uses: actions/checkout@v7
+         with:
+@@ -172,8 +191,8 @@
+ 
+       - name: Check for changelog fragments
+         env:
+-          GITHUB_BASE_REF: ${{ github.base_ref }}
+-          GITHUB_HEAD_REF: ${{ github.head_ref }}
++          GITHUB_BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
++          GITHUB_HEAD_REF: ${{ github.head_ref || github.ref_name }}
+         run: python3 scripts/check_changelog_fragment.py
+ 
+   # === VERSION CHECK - prevents manual version modification in PRs ===
+@@ -185,7 +204,9 @@
+     concurrency:
+       group: ${{ github.workflow }}-${{ github.ref }}-version-check
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+-    if: github.event_name == 'pull_request'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (github.event_name == 'pull_request'))
+     steps:
+       - uses: actions/checkout@v7
+         with:
+@@ -194,8 +215,8 @@
+ 
+       - name: Check for manual version changes
+         env:
+-          GITHUB_BASE_REF: ${{ github.base_ref }}
+-          GITHUB_HEAD_REF: ${{ github.head_ref }}
++          GITHUB_BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
++          GITHUB_HEAD_REF: ${{ github.head_ref || github.ref_name }}
+         run: python3 scripts/check_version_modification.py
+ 
+   # === SECRETS SCAN ===
+@@ -226,7 +247,9 @@
+       group: ${{ github.workflow }}-${{ github.ref }}-fresh-merge
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [detect-changes]
+-    if: github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') ||
++      (github.event_name == 'pull_request' && needs.detect-changes.outputs.any-code-changed == 'true'))
+     steps:
+       - uses: actions/checkout@v7
+         with:
+@@ -235,7 +258,7 @@
+ 
+       - name: Simulate fresh merge with base branch
+         env:
+-          BASE_REF: ${{ github.base_ref }}
++          BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+         run: bash scripts/simulate-fresh-merge.sh
+ 
+       - name: Locate the C++ project
+@@ -267,11 +290,10 @@
+     # Note: !cancelled() is required because detect-changes is skipped on workflow_dispatch,
+     # and without it, this job would also be skipped even though its condition includes workflow_dispatch.
+     # See: https://github.com/actions/runner/issues/491
+-    if: |
+-      !cancelled() && (
+-        github.event_name == 'workflow_dispatch' ||
+-        needs.detect-changes.outputs.any-code-changed == 'true'
+-      )
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && ( github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.any-code-changed == 'true'
++      )))
+     steps:
+       - uses: actions/checkout@v7
+         with:
+@@ -350,11 +372,10 @@
+     # Note: !cancelled() is required because detect-changes is skipped on workflow_dispatch,
+     # and without it, this job would also be skipped even though its condition includes workflow_dispatch.
+     # See: https://github.com/actions/runner/issues/491
+-    if: |
+-      !cancelled() && (
+-        github.event_name == 'workflow_dispatch' ||
+-        needs.detect-changes.outputs.any-code-changed == 'true'
+-      )
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && ( github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.any-code-changed == 'true'
++      )))
+     strategy:
+       fail-fast: false
+       matrix:
+@@ -433,11 +454,10 @@
+     # Note: !cancelled() is required because detect-changes is skipped on workflow_dispatch,
+     # and without it, this job would also be skipped even though its condition includes workflow_dispatch.
+     # See: https://github.com/actions/runner/issues/491
+-    if: |
+-      !cancelled() && (
+-        github.event_name == 'workflow_dispatch' ||
+-        needs.detect-changes.outputs.any-code-changed == 'true'
+-      )
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && ( github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.any-code-changed == 'true'
++      )))
+     steps:
+       - uses: actions/checkout@v7
+         with:
+@@ -472,11 +492,10 @@
+     # Note: !cancelled() is required because detect-changes is skipped on workflow_dispatch,
+     # and without it, this job would also be skipped even though its condition includes workflow_dispatch.
+     # See: https://github.com/actions/runner/issues/491
+-    if: |
+-      !cancelled() && (
+-        github.event_name == 'workflow_dispatch' ||
+-        needs.detect-changes.outputs.any-code-changed == 'true'
+-      )
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && ( github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.any-code-changed == 'true'
++      )))
+     steps:
+       - uses: actions/checkout@v7
+         with:
+@@ -513,11 +532,9 @@
+     # Note: !cancelled() is required because detect-changes is skipped on workflow_dispatch,
+     # and without it, this job would also be skipped even though its condition includes workflow_dispatch.
+     # See: https://github.com/actions/runner/issues/491
+-    if: |
+-      !cancelled() && (
+-        github.event_name == 'workflow_dispatch' ||
+-        needs.detect-changes.outputs.cpp-changed == 'true'
+-      )
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && ( github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.cpp-changed == 'true' )))
+     steps:
+       - uses: actions/checkout@v7
+         with:
+@@ -576,7 +593,10 @@
+       group: ${{ github.workflow }}-${{ github.ref }}-build
+       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+     needs: [lint, test, sanitizers, script-tests]
+-    if: ${{ !cancelled() && needs.lint.result == 'success' && needs.test.result == 'success' && needs.sanitizers.result == 'success' && needs.script-tests.result == 'success' }}
++    if: >-
++      !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'checks') || (!cancelled()
++      && needs.lint.result == 'success' && needs.test.result == 'success' && needs.sanitizers.result ==
++      'success' && needs.script-tests.result == 'success'))
+     steps:
+       - uses: actions/checkout@v7
+         with:
+@@ -650,24 +670,31 @@
+       group: ${{ github.workflow }}-main-write
+       cancel-in-progress: false
+     # Note: !cancelled() ensures consistent behavior with other jobs that depend on skipped jobs.
+-    if: |
+-      !cancelled() &&
+-      github.event_name == 'push' &&
+-      github.ref == 'refs/heads/main' &&
+-      needs.release-preflight.result == 'success' &&
+-      needs.build.result == 'success'
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (!cancelled() && github.event_name == 'push' &&
++      github.ref == 'refs/heads/main' && needs.release-preflight.result == 'success' && needs.build.result ==
++      'success')
+     runs-on: ubuntu-latest
+     timeout-minutes: 45
+     permissions:
+       contents: write
+     steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       # This job pushes the version bump commit and tag back to `main`, so the
+       # checkout credentials have to stay in `.git/config` (no
+       # `persist-credentials: false` here, unlike every read-only checkout).
+       - uses: actions/checkout@v7
+         with:
+           fetch-depth: 0
+-          token: ${{ secrets.GITHUB_TOKEN }}
++          token: ${{ steps.gh.outputs.token }}
+           persist-credentials: true
+ 
+       - name: Setup Python
+@@ -687,7 +714,7 @@
+         id: check
+         env:
+           HAS_FRAGMENTS: ${{ steps.bump_type.outputs.has_fragments }}
+-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GITHUB_TOKEN: ${{ steps.gh.outputs.token }}
+           NUGET_PUBLISH: ${{ vars.NUGET_PUBLISH }}
+           NUGET_PACKAGE_ID: ${{ vars.NUGET_PACKAGE_ID }}
+         run: python scripts/check_release_needed.py
+@@ -702,7 +729,7 @@
+       - name: Publish the release
+         if: steps.check.outputs.should_release == 'true'
+         env:
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_TOKEN: ${{ steps.gh.outputs.token }}
+           NUGET_PUBLISH: ${{ vars.NUGET_PUBLISH }}
+           NUGET_PACKAGE_ID: ${{ vars.NUGET_PACKAGE_ID }}
+           RELEASE_ARCHIVE_BASENAME: ${{ vars.RELEASE_ARCHIVE_BASENAME }}
+@@ -725,24 +752,31 @@
+       cancel-in-progress: false
+     # Note: !cancelled() is required to evaluate the condition when dependencies may be skipped.
+     # The build job ensures lint and test passed before this job runs.
+-    if: |
+-      !cancelled() &&
+-      github.event_name == 'workflow_dispatch' &&
+-      github.event.inputs.release_mode == 'instant' &&
+-      needs.release-preflight.result == 'success' &&
+-      needs.build.result == 'success'
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (!cancelled() && github.event_name ==
++      'workflow_dispatch' && github.event.inputs.release_mode == 'instant' && needs.release-preflight.result
++      == 'success' && needs.build.result == 'success')
+     runs-on: ubuntu-latest
+     timeout-minutes: 45
+     permissions:
+       contents: write
+     steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       # This job pushes the version bump commit and tag back to `main`, so the
+       # checkout credentials have to stay in `.git/config` (no
+       # `persist-credentials: false` here, unlike every read-only checkout).
+       - uses: actions/checkout@v7
+         with:
+           fetch-depth: 0
+-          token: ${{ secrets.GITHUB_TOKEN }}
++          token: ${{ steps.gh.outputs.token }}
+           persist-credentials: true
+ 
+       - name: Setup Python
+@@ -764,7 +798,7 @@
+       - name: Publish the release
+         if: steps.version.outputs.version_committed == 'true' || steps.version.outputs.already_released == 'true'
+         env:
+-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++          GH_TOKEN: ${{ steps.gh.outputs.token }}
+           NUGET_PUBLISH: ${{ vars.NUGET_PUBLISH }}
+           NUGET_PACKAGE_ID: ${{ vars.NUGET_PACKAGE_ID }}
+           RELEASE_ARCHIVE_BASENAME: ${{ vars.RELEASE_ARCHIVE_BASENAME }}
+@@ -777,16 +811,28 @@
+   # === MANUAL CHANGELOG PR ===
+   changelog-pr:
+     name: Create Changelog PR
+-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_mode == 'changelog-pr'
++    if: >-
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name !=
++      'workflow_dispatch' || inputs.mode == 'release') && (github.event_name == 'workflow_dispatch' &&
++      github.event.inputs.release_mode == 'changelog-pr')
+     runs-on: ubuntu-latest
+     timeout-minutes: 10
+     concurrency:
+       group: ${{ github.workflow }}-main-write
+       cancel-in-progress: false
+     permissions:
++      actions: write
+       contents: write
+       pull-requests: write
+     steps:
++      - name: Resolve GitHub credentials
++        id: gh
++        uses: link-foundation/.github/actions/resolve-github-token@main
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
+       - uses: actions/checkout@v7
+         with:
+           persist-credentials: false
+@@ -799,9 +845,10 @@
+         run: python3 scripts/create_changelog_fragment.py --bump-type "$BUMP_TYPE" --description "$DESCRIPTION"
+ 
+       - name: Create Pull Request
++        id: automation-pr
+         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+         with:
+-          token: ${{ secrets.GITHUB_TOKEN }}
++          token: ${{ steps.gh.outputs.token }}
+           commit-message: 'chore: add changelog for manual ${{ github.event.inputs.bump_type }} release'
+           branch: changelog-manual-release-${{ github.run_id }}
+           delete-branch: true
+@@ -820,6 +867,15 @@
+             1. Review the changelog fragment in this PR
+             2. Merge this PR to main
+             3. The automated release workflow will create the GitHub release and publish to every configured channel
++
++      - name: Dispatch checks for automation pull request
++        if: steps.automation-pr.outputs.pull-request-number != ''
++        uses: link-foundation/.github/actions/dispatch-checks@main
++        with:
++          ref: ${{ steps.automation-pr.outputs.pull-request-branch }}
++          workflows: release.yml
++          token: ${{ steps.gh.outputs.token }}
++          triggers-workflows: ${{ steps.gh.outputs.triggers-workflows }}
+ 
+   # === PIPELINE STATUS ===
+   # Terminal status gate: GitHub reports jobs killed by timeout-minutes as
+--- /dev/null
++++ b/.github/workflows/automation-pr.yml
+@@ -0,0 +1,66 @@
++name: Automation documentation pull request
++on:
++  workflow_dispatch:
++    inputs:
++      mode:
++        description: Choose create-pr to request a documentation update.
++        type: choice
++        default: checks
++        options: [checks, create-pr]
++      description:
++        description: Documentation text to append to docs/automation.md.
++        type: string
++        default: Automated documentation update.
++permissions:
++  contents: read
++concurrency:
++  group: automation-documentation-pr
++  cancel-in-progress: false
++jobs:
++  update:
++    if: >-
++      inputs.mode == 'create-pr' &&
++      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
++    runs-on: ubuntu-24.04
++    timeout-minutes: 10
++    permissions:
++      contents: write
++      pull-requests: write
++      actions: write
++    steps:
++      - uses: actions/checkout@v6
++        with:
++          persist-credentials: false
++      - uses: link-foundation/.github/actions/resolve-github-token@main
++        id: gh
++        with:
++          app-id: ${{ vars.AUTOMATION_APP_ID }}
++          app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
++          token: ${{ secrets.AUTOMATION_TOKEN }}
++          default-token: ${{ github.token }}
++      - name: Prepare documentation update
++        env:
++          DESCRIPTION: ${{ inputs.description }}
++        run: |
++          python3 - <<'PY'
++          import os
++          from pathlib import Path
++          path = Path('docs/automation.md')
++          path.parent.mkdir(parents=True, exist_ok=True)
++          with path.open('a') as stream:
++              stream.write(os.environ['DESCRIPTION'] + '\n')
++          PY
++      - uses: peter-evans/create-pull-request@v8
++        id: pr
++        with:
++          token: ${{ steps.gh.outputs.token }}
++          branch: automation/documentation
++          title: 'docs: automation update'
++          commit-message: 'docs: automation update'
++      - uses: link-foundation/.github/actions/dispatch-checks@main
++        if: steps.pr.outputs.pull-request-number != ''
++        with:
++          ref: ${{ steps.pr.outputs.pull-request-branch }}
++          workflows: release.yml
++          token: ${{ steps.gh.outputs.token }}
++          triggers-workflows: ${{ steps.gh.outputs.triggers-workflows }}

@@ -1,0 +1,5 @@
+{
+  "name": "Optional GitHub automation credentials",
+  "description": "Create a documentation pull request with optional App or AUTOMATION_TOKEN credentials and dispatch checks with the default token.",
+  "categories": ["Automation"]
+}
